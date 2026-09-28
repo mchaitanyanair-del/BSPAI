@@ -1,405 +1,438 @@
-"""bspai_engine.py
-
-Backend computational engine for BSPAI (BiSpec Pairwise AI).
-Computes single-cell tumor microenvironment features and trains
-the biological pairwise XGBoost viability model.
+"""
+bspai_pipeline_unified.py
+=============================================================================
+Consolidated Machine Learning & Benchmarking Pipeline for BSPAI.
+Integrates:
+  1. Single-cell RNA-seq biological feature extraction (GSE131907).
+  2. 5-tier clinical progression hierarchy mapping (Supplementary Table 1).
+  3. Stratified 5-Fold Cross-Validation & Out-of-Fold Evaluation.
+  4. Holdout Train/Test Split (80/20) validation.
+  5. Dedicated Benchmarking against the published Top-100 Target Pairs.
+  6. Artifact export for Streamlit (joblib model, features CSV, quick-slice h5ad).
+  7. Live candidate inference engine with Table 5 discretized RAG payloads.
+=============================================================================
 """
 
 import os
 import joblib
 import numpy as np
 import pandas as pd
-from scipy.stats import pearsonr
+from scipy.stats import pearsonr, spearmanr
 import scanpy as sc
-from sklearn.metrics import average_precision_score, roc_auc_score
+from sklearn.metrics import (
+    roc_auc_score,
+    average_precision_score,
+    classification_report,
+    confusion_matrix
+)
 from sklearn.model_selection import StratifiedKFold, train_test_split
 import xgboost as xgb
 
 # =====================================================================
-# 1. PATH CONFIGURATION & CONSTANTS
+# 1. FILE PATH CONFIGURATION & CONSTANTS
 # =====================================================================
 DATA_DIR = r"C:\Users\Rishi\Downloads"
+
+# Primary single-cell AnnData
 H5AD_PATH = os.path.join(DATA_DIR, "GSE131907_Lung_Cancer_preprocessed.h5ad")
-SUPP_TABLE_1_PATH = os.path.join(
-    DATA_DIR, "432_2024_5740_MOESM3_ESM (1).xlsx"
-)
-MODEL_SAVE_PATH = os.path.join(DATA_DIR, "bspai_xgb_model.joblib")
+
+# 1. Training Labels: The 791 Clinical Drug Candidates (Supplementary Table 1)
+SUPP_TABLE_1_PATH = os.path.join(DATA_DIR, "432_2024_5740_MOESM3_ESM (1).xlsx")
+
+# 2. Benchmarking: Your separate dataset containing the Top 100 Published Targets
+
+BENCHMARK_TABLE_PATH = r"C:\Users\Rishi\Downloads\432_2024_5740_MOESM5_ESM.xlsx"
+
+# Export Artifacts for Streamlit Frontend
+SAVED_FEATURES_CSV = os.path.join(DATA_DIR, "bspai_features.csv")
+SAVED_MODEL_PATH = os.path.join(DATA_DIR, "bspai_model.joblib")
+SAVED_SLICED_H5AD = os.path.join(DATA_DIR, "bspai_quick_slice.h5ad")
 
 KEY_SUBTYPES = [
     "T:Treg",
     "T:Exhausted CD8+ T",
     "Myeloid:Macrophage",
-    "Epithelial cells",
+    "Epithelial cells"
 ]
 
 GENE_ALIASES = {
-    "CD20": "MS4A1",
-    "PD-1": "PDCD1",
-    "PD1": "PDCD1",
-    "PD-L1": "CD274",
-    "PDL1": "CD274",
-    "CTLA-4": "CTLA4",
-    "BCMA": "TNFRSF17",
-    "CD3": "CD3E",
-    "C-MET": "MET",
-    "HER2": "ERBB2",
-    "HER3": "ERBB3",
-    "4-1BB": "TNFRSF9",
+    "CD20": "MS4A1", "PD-1": "PDCD1", "PD1": "PDCD1", "PD-L1": "CD274",
+    "PDL1": "CD274", "CTLA-4": "CTLA4", "BCMA": "TNFRSF17", "CD3": "CD3E",
+    "C-MET": "MET", "HER2": "ERBB2", "HER3": "ERBB3", "4-1BB": "TNFRSF9"
 }
 
-# Quantile discretization thresholds from Table 5 in Zhang et al.
+# Table 5 Quantile Discretization Thresholds
 DISCRETIZATION_BINS = {
     "safe_avg": [
         (-float("inf"), -0.0071, "Unsafe / Off-Tumor Risk"),
         (-0.0071, -0.000073, "Low Safety"),
         (-0.000073, 0.0012, "Safe / Tolerable"),
         (0.0012, 0.013, "Moderately High Safety"),
-        (0.013, float("inf"), "High Safety"),
+        (0.013, float("inf"), "High Safety")
     ],
     "double_ratio_max": [
         (0.0, 0.00019, "Low Co-expression"),
         (0.00019, 0.0015, "Moderately Low"),
         (0.0015, 0.0071, "Moderate Co-expression"),
         (0.0071, 0.35, "Above Average"),
-        (0.35, 1.0, "High Co-localization"),
-    ],
+        (0.35, 1.0, "High Co-localization")
+    ]
 }
 
-
-def discretize_metric(metric_name: str, value: float) -> str:
-  """Converts continuous biological metrics into qualitative categorical tags."""
-  if metric_name not in DISCRETIZATION_BINS:
+def discretize_metric(metric_name: str, val: float) -> str:
+    """Converts continuous biological metrics into qualitative categorical tags."""
+    for low, high, tag in DISCRETIZATION_BINS.get(metric_name, []):
+        if low <= val < high:
+            return tag
     return "N/A"
-  for low, high, tag in DISCRETIZATION_BINS[metric_name]:
-    if low <= value < high:
-      return tag
-  return "N/A"
-
 
 # =====================================================================
 # 2. ANNDATA LOADER & SYMBOL RESOLUTION
 # =====================================================================
-def load_anndata(path: str = H5AD_PATH) -> sc.AnnData:
-  """Loads the preprocessed single-cell RNA-seq object."""
-  if not os.path.exists(path):
-    raise FileNotFoundError(
-        f"AnnData file not found at: {path}. Please verify the file path."
-    )
-  print(f"[Engine] Loading scRNA-seq matrix from {path}...")
-  adata = sc.read_h5ad(path)
-  print(f"[Engine] AnnData loaded: {adata.n_obs} cells x {adata.n_vars} genes.")
-  return adata
+print("=" * 70)
+print("STEP 1: Loading Single-Cell RNA-seq Matrix (AnnData)...")
+print("=" * 70)
 
+if not os.path.exists(H5AD_PATH):
+    raise FileNotFoundError(f"AnnData file not found at: {H5AD_PATH}")
 
-def get_var_lookup_map(adata: sc.AnnData) -> dict:
-  """Builds a case-insensitive lookup table for gene names in AnnData."""
-  return {name.upper(): name for name in adata.var_names}
+adata = sc.read_h5ad(H5AD_PATH)
+print(f"Matrix loaded successfully: {adata.n_obs} cells x {adata.n_vars} genes.")
 
+var_lookup_map = {name.upper(): name for name in adata.var_names}
 
-def resolve_gene_symbol(gene_symbol: str, var_upper_map: dict) -> str:
-  """Resolves aliases and case-sensitivity against AnnData features."""
-  s = str(gene_symbol).strip().upper()
-  s = GENE_ALIASES.get(s, s)
-  return var_upper_map.get(s, None)
+def resolve_symbol(gene: str) -> str:
+    clean = str(gene).strip().upper()
+    clean = GENE_ALIASES.get(clean, clean)
+    return var_lookup_map.get(clean, None)
 
-
-def extract_gene_vector(
-    adata_sub: sc.AnnData, resolved_gene: str
-) -> np.ndarray:
-  """Extracts a 1D dense expression array for a gene across an AnnData subset."""
-  if resolved_gene is not None and resolved_gene in adata_sub.var_names:
-    vec = adata_sub[:, resolved_gene].X
-    if hasattr(vec, "toarray"):
-      vec = vec.toarray().flatten()
-    return np.asarray(vec).flatten()
-  return np.zeros(adata_sub.n_obs, dtype=np.float32)
-
+def extract_dense_expression(sub_adata: sc.AnnData, resolved_gene: str) -> np.ndarray:
+    if resolved_gene is not None and resolved_gene in sub_adata.var_names:
+        v = sub_adata[:, resolved_gene].X
+        if hasattr(v, "toarray"):
+            v = v.toarray().flatten()
+        return np.asarray(v).flatten()
+    return np.zeros(sub_adata.n_obs, dtype=np.float32)
 
 # =====================================================================
-# 3. BIOLOGICAL FEATURE EXTRACTION
+# 3. BIOLOGICAL FEATURE ENGINEERING ENGINE
 # =====================================================================
-def compute_pair_features(
-    adata_obj: sc.AnnData,
-    gene_a_str: str,
-    gene_b_str: str,
-    threshold: float = 0.1,
-) -> dict:
-  """Computes safe_avg, single/double positive ratios, and subtype correlations."""
-  var_lookup = get_var_lookup_map(adata_obj)
-  ga = resolve_gene_symbol(gene_a_str, var_lookup)
-  gb = resolve_gene_symbol(gene_b_str, var_lookup)
+def compute_pair_features(adata_obj: sc.AnnData, gene_a: str, gene_b: str, threshold: float = 0.1) -> dict:
+    ga, gb = resolve_symbol(gene_a), resolve_symbol(gene_b)
+    feats = {
+        "Target_A_resolved": ga if ga else "Unresolved",
+        "Target_B_resolved": gb if gb else "Unresolved"
+    }
 
-  feats = {
-      "Target_A_resolved": ga if ga else "Unresolved",
-      "Target_B_resolved": gb if gb else "Unresolved",
-  }
+    # 1. Safety Differential: Harmonic mean across Tumor vs Normal Tissue
+    t_mask = adata_obj.obs["Cell_type.refined"].isin(["tLung", "Tumor"])
+    n_mask = adata_obj.obs["Cell_type.refined"].isin(["nLung", "Normal"])
 
-  # 1. Safety differential: harmonic mean of (tumor - normal)
-  t_mask = adata_obj.obs["Cell_type.refined"].isin(["tLung", "Tumor"])
-  n_mask = adata_obj.obs["Cell_type.refined"].isin(["nLung", "Normal"])
+    va_t, va_n = extract_dense_expression(adata_obj[t_mask], ga), extract_dense_expression(adata_obj[n_mask], ga)
+    vb_t, vb_n = extract_dense_expression(adata_obj[t_mask], gb), extract_dense_expression(adata_obj[n_mask], gb)
 
-  va_t = extract_gene_vector(adata_obj[t_mask], ga)
-  va_n = extract_gene_vector(adata_obj[n_mask], ga)
-  vb_t = extract_gene_vector(adata_obj[t_mask], gb)
-  vb_n = extract_gene_vector(adata_obj[n_mask], gb)
+    da = float(np.mean(va_t) - np.mean(va_n))
+    db = float(np.mean(vb_t) - np.mean(vb_n))
+    feats["safe_avg"] = (da * db) / (da + db) if (da + db) != 0 else 0.0
 
-  d_a = float(np.mean(va_t) - np.mean(va_n))
-  d_b = float(np.mean(vb_t) - np.mean(vb_n))
+    # 2. Subpopulation Specific Co-expression & Pearson Correlations
+    double_ratios = []
+    single_ratios = []
 
-  if (d_a + d_b) != 0:
-    feats["safe_avg"] = (d_a * d_b) / (d_a + d_b)
-  else:
-    feats["safe_avg"] = 0.0
+    for sub in KEY_SUBTYPES:
+        clean_key = sub.replace(":", "_").replace("+", "plus").replace(" ", "_")
+        sub_mask = (adata_obj.obs["Cell_subtype"] == sub) if "Cell_subtype" in adata_obj.obs else np.zeros(adata_obj.n_obs, dtype=bool)
 
-  # 2. Subpopulation-specific metrics
-  double_ratios = []
-  single_ratios = []
+        if np.sum(sub_mask) < 15:
+            feats[f"corrcoef_{clean_key}"] = 0.0
+            feats[f"double_ratio_{clean_key}"] = 0.0
+            feats[f"sum_single_exp_{clean_key}"] = 0.0
+            continue
 
-  for subtype in KEY_SUBTYPES:
-    clean_key = (
-        subtype.replace(":", "_").replace("+", "plus").replace(" ", "_")
-    )
-    sub_mask = (
-        adata_obj.obs["Cell_subtype"] == subtype
-        if "Cell_subtype" in adata_obj.obs
-        else np.zeros(adata_obj.n_obs, dtype=bool)
-    )
+        sub_ad = adata_obj[sub_mask]
+        va = extract_dense_expression(sub_ad, ga)
+        vb = extract_dense_expression(sub_ad, gb)
 
-    if np.sum(sub_mask) < 15:
-      feats[f"corrcoef_{clean_key}"] = 0.0
-      feats[f"double_ratio_{clean_key}"] = 0.0
-      feats[f"sum_single_exp_{clean_key}"] = 0.0
-      continue
+        if np.std(va) > 1e-5 and np.std(vb) > 1e-5:
+            r = pearsonr(va, vb)[0]
+            feats[f"corrcoef_{clean_key}"] = 0.0 if np.isnan(r) else float(r)
+        else:
+            feats[f"corrcoef_{clean_key}"] = 0.0
 
-    sub_adata = adata_obj[sub_mask]
-    va = extract_gene_vector(sub_adata, ga)
-    vb = extract_gene_vector(sub_adata, gb)
+        p_double = float(np.mean((va > threshold) & (vb > threshold)))
+        p_single = float(np.mean(va > threshold) + np.mean(vb > threshold))
 
-    # Pearson correlation
-    if np.std(va) > 1e-5 and np.std(vb) > 1e-5:
-      r, _ = pearsonr(va, vb)
-      feats[f"corrcoef_{clean_key}"] = 0.0 if np.isnan(r) else float(r)
-    else:
-      feats[f"corrcoef_{clean_key}"] = 0.0
+        double_ratios.append(p_double)
+        single_ratios.append(p_single)
 
-    # Activity fractions above threshold
-    pos_a = va > threshold
-    pos_b = vb > threshold
-    p_double = float(np.mean(pos_a & pos_b))
-    p_single = float(np.mean(pos_a) + np.mean(pos_b))
+        feats[f"double_ratio_{clean_key}"] = p_double
+        feats[f"sum_single_exp_{clean_key}"] = float(np.mean(va) + np.mean(vb))
 
-    double_ratios.append(p_double)
-    single_ratios.append(p_single)
-
-    feats[f"double_ratio_{clean_key}"] = p_double
-    feats[f"sum_single_exp_{clean_key}"] = float(np.mean(va) + np.mean(vb))
-
-  feats["double_ratio_max"] = max(double_ratios) if double_ratios else 0.0
-  feats["sum_single_ratio_max"] = max(single_ratios) if single_ratios else 0.0
-
-  return feats
-
+    feats["double_ratio_max"] = max(double_ratios) if double_ratios else 0.0
+    feats["sum_single_ratio_max"] = max(single_ratios) if single_ratios else 0.0
+    return feats
 
 # =====================================================================
-# 4. CLINICAL LABEL PARSING & DATASET BUILDER
+# 4. CLINICAL DATA EXTRACTION & FEATURE MATRIX GENERATION
 # =====================================================================
-def load_and_preprocess_clinical_labels(
-    table_path: str = SUPP_TABLE_1_PATH,
-) -> pd.DataFrame:
-  """Loads Supplementary Table 1 and extracts standardized candidate pairs."""
-  df_clin = pd.read_excel(table_path)
-  if "Drug Highest Phase" not in [str(c).strip() for c in df_clin.columns]:
+print("\n" + "=" * 70)
+print("STEP 2: Parsing Clinical Labels & Building Feature Matrix...")
+print("=" * 70)
+
+if not os.path.exists(SUPP_TABLE_1_PATH):
+    raise FileNotFoundError(f"Clinical file not found at: {SUPP_TABLE_1_PATH}")
+
+df_clin = pd.read_excel(SUPP_TABLE_1_PATH)
+if "Drug Highest Phase" not in [str(c).strip() for c in df_clin.columns]:
     for r in range(1, 4):
-      temp = pd.read_excel(table_path, header=r)
-      if "Drug Highest Phase" in [str(c).strip() for c in temp.columns]:
-        df_clin = temp
-        break
+        tmp = pd.read_excel(SUPP_TABLE_1_PATH, header=r)
+        if "Drug Highest Phase" in [str(c).strip() for c in tmp.columns]:
+            df_clin = tmp
+            break
 
-  df_clin.columns = df_clin.columns.astype(str).str.strip()
-  df_clin = df_clin[
-      df_clin["Target(Gene Name)"].astype(str).str.contains(r"\+", na=False)
-  ].copy()
+df_clin.columns = df_clin.columns.astype(str).str.strip()
+df_clin = df_clin[df_clin["Target(Gene Name)"].astype(str).str.contains(r"\+", na=False)].copy()
 
-  def split_and_alphabetize_pair(target_str):
-    parts = [p.strip().upper() for p in str(target_str).split("+") if p.strip()]
-    if len(parts) != 2:
-      return pd.Series([np.nan, np.nan])
-    parts.sort()
-    return pd.Series([parts[0], parts[1]])
+def split_and_order_pair(s):
+    pts = [p.strip().upper() for p in str(s).split("+") if p.strip()]
+    if len(pts) != 2:
+        return pd.Series([np.nan, np.nan])
+    pts.sort()
+    return pd.Series([pts[0], pts[1]])
 
-  df_clin[["Target_A", "Target_B"]] = df_clin["Target(Gene Name)"].apply(
-      split_and_alphabetize_pair
-  )
-  df_clin = df_clin.dropna(subset=["Target_A", "Target_B"]).reset_index(
-      drop=True
-  )
+df_clin[["Target_A", "Target_B"]] = df_clin["Target(Gene Name)"].apply(split_and_order_pair)
+df_clin = df_clin.dropna(subset=["Target_A", "Target_B"]).reset_index(drop=True)
 
-  phase_map = {
-      "approved": 1,
-      "nda": 1,
-      "bla": 1,
-      "phase 3": 2,
-      "phase 2/3": 2,
-      "phase 2": 3,
-      "phase 1/2": 3,
-      "phase 1": 3,
-      "preclinical": 4,
-      "ind": 4,
-      "discontinued": 5,
-      "pending": 5,
-  }
+# 5-Tier Clinical Progression Hierarchy
+phase_map = {
+    "approved": 1, "nda": 1, "bla": 1,
+    "phase 3": 2, "phase 2/3": 2,
+    "phase 2": 3, "phase 1/2": 3, "phase 1": 3,
+    "preclinical": 4, "ind": 4,
+    "discontinued": 5, "pending": 5
+}
+df_clin["Clinical_Rank"] = df_clin["Drug Highest Phase"].apply(
+    lambda x: next((v for k, v in phase_map.items() if k in str(x).lower()), 4)
+)
+# Rank 1-2 = Validated/Late Development, Rank 3-5 = Early/Other
+df_clin["Target_Label"] = (df_clin["Clinical_Rank"] <= 2).astype(int)
 
-  def map_clinical_rank(val):
-    s = str(val).strip().lower()
-    for k, v in phase_map.items():
-      if k in s:
-        return v
-    return 4
+# Deduplicate identical combinations by taking highest clinical progress
+unique_pairs = (
+    df_clin.groupby(["Target_A", "Target_B"])
+    .agg({"Clinical_Rank": "min", "Target_Label": "max"})
+    .reset_index()
+)
 
-  df_clin["Clinical_Rank"] = df_clin["Drug Highest Phase"].apply(
-      map_clinical_rank
-  )
-  df_clin["Target_Label"] = (df_clin["Clinical_Rank"] <= 2).astype(int)
-
-  unique_pairs = (
-      df_clin.groupby(["Target_A", "Target_B"])
-      .agg({"Clinical_Rank": "min", "Target_Label": "max"})
-      .reset_index()
-  )
-  return unique_pairs
-
-
-def build_feature_matrix(
-    adata: sc.AnnData, unique_pairs: pd.DataFrame
-) -> tuple:
-  """Iterates over target pairs and builds the training feature matrix."""
-  records = []
-  print(
-      f"[Engine] Computing biological features for {len(unique_pairs)} target"
-      " pairs..."
-  )
-  for idx, row in unique_pairs.iterrows():
+print(f"Extracting biological features for {len(unique_pairs)} unique target pairs...")
+records = []
+for _, row in unique_pairs.iterrows():
     gA, gB = row["Target_A"], row["Target_B"]
-    feats = compute_pair_features(adata, gA, gB)
-    feats["Target_A"] = gA
-    feats["Target_B"] = gB
-    feats["Clinical_Rank"] = row["Clinical_Rank"]
-    feats["Target_Label"] = row["Target_Label"]
-    records.append(feats)
+    f = compute_pair_features(adata, gA, gB)
+    f["Target_A"] = gA
+    f["Target_B"] = gB
+    f["Clinical_Rank"] = row["Clinical_Rank"]
+    f["Target_Label"] = row["Target_Label"]
+    records.append(f)
 
-  feature_df = pd.DataFrame(records)
-  meta_cols = [
-      "Target_A",
-      "Target_B",
-      "Clinical_Rank",
-      "Target_Label",
-      "Target_A_resolved",
-      "Target_B_resolved",
-  ]
-  feature_cols = [c for c in feature_df.columns if c not in meta_cols]
-  X = feature_df[feature_cols].copy()
-  y = feature_df["Target_Label"].copy()
-  return X, y, feature_cols, feature_df
+feature_df = pd.DataFrame(records)
+meta_cols = ["Target_A", "Target_B", "Clinical_Rank", "Target_Label", "Target_A_resolved", "Target_B_resolved"]
+feature_cols = [c for c in feature_df.columns if c not in meta_cols]
 
+X = feature_df[feature_cols].copy()
+y = feature_df["Target_Label"].copy()
 
-# =====================================================================
-# 5. MODEL TRAINING & INITIALIZATION
-# =====================================================================
-def train_production_model(X: pd.DataFrame, y: pd.Series) -> xgb.XGBClassifier:
-  """Trains the final production gradient-boosted classifier."""
-  pos_count = int((y == 1).sum())
-  neg_count = int((y == 0).sum())
-  scale_pos_weight = neg_count / max(pos_count, 1)
+pos_count = int((y == 1).sum())
+neg_count = int((y == 0).sum())
+scale_pos_weight = neg_count / max(pos_count, 1)
 
-  final_model = xgb.XGBClassifier(
-      n_estimators=100,
-      max_depth=4,
-      learning_rate=0.05,
-      subsample=0.8,
-      colsample_bytree=0.8,
-      scale_pos_weight=scale_pos_weight,
-      eval_metric="logloss",
-      random_state=42,
-  )
-  final_model.fit(X, y)
-  return final_model
-
-
-def get_trained_pipeline():
-  """Loads resources and returns (adata, model, feature_cols, training_summary)."""
-  adata = load_anndata(H5AD_PATH)
-  unique_pairs = load_and_preprocess_clinical_labels(SUPP_TABLE_1_PATH)
-  X, y, feature_cols, feature_df = build_feature_matrix(adata, unique_pairs)
-  model = train_production_model(X, y)
-
-  summary = {
-      "total_pairs": len(feature_df),
-      "pos_count": int((y == 1).sum()),
-      "neg_count": int((y == 0).sum()),
-      "feature_count": len(feature_cols),
-  }
-  return adata, model, feature_cols, summary
-
+print(f"Dataset Built: {len(feature_df)} pairs | Positive: {pos_count} | Negative: {neg_count}")
+print(f"Calculated scale_pos_weight: {scale_pos_weight:.2f}")
 
 # =====================================================================
-# 6. INFERENCE & RAG PAYLOAD GENERATOR
+# 5. STRATIFIED CROSS-VALIDATION EVALUATION
 # =====================================================================
-def run_live_inference(
-    adata: sc.AnnData,
-    model: xgb.XGBClassifier,
-    feature_cols: list,
-    gene_a: str,
-    gene_b: str,
-    threshold: float = 0.35,
-) -> dict:
-  """Predicts viability probability, extracts feature details, and prepares RAG payload."""
-  pair = sorted([gene_a.strip().upper(), gene_b.strip().upper()])
-  live_feats = compute_pair_features(adata, pair[0], pair[1])
+print("\n" + "=" * 70)
+print("STEP 3: Running Stratified 5-Fold Cross-Validation...")
+print("=" * 70)
 
-  # Prepare numeric vector for inference
-  input_df = pd.DataFrame([live_feats])[feature_cols]
-  prob = float(model.predict_proba(input_df)[0][1])
-  verdict = (
-      "APPROVED / CANDIDATE DRUG"
-      if prob >= threshold
-      else "INVESTIGATIONAL / UNVIABLE"
-  )
+n_splits = min(5, max(2, pos_count))
+skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
+oof_probs = np.zeros(len(y))
 
-  # Discretize for natural language explanation
-  safe_tag = discretize_metric("safe_avg", live_feats["safe_avg"])
-  double_tag = discretize_metric(
-      "double_ratio_max", live_feats["double_ratio_max"]
-  )
+for fold, (train_idx, val_idx) in enumerate(skf.split(X, y), 1):
+    X_tr, y_tr = X.iloc[train_idx], y.iloc[train_idx]
+    X_va = X.iloc[val_idx]
 
-  # Formatted prompt payload matching Phase 2 from the BSPAI study
-  rag_payload = f"""{{ml_result}}
+    fold_model = xgb.XGBClassifier(
+        n_estimators=100, max_depth=4, learning_rate=0.05,
+        subsample=0.8, colsample_bytree=0.8, scale_pos_weight=scale_pos_weight,
+        eval_metric="logloss", random_state=42
+    )
+    fold_model.fit(X_tr, y_tr)
+    oof_probs[val_idx] = fold_model.predict_proba(X_va)[:, 1]
+
+cv_auc = roc_auc_score(y, oof_probs)
+cv_pr_auc = average_precision_score(y, oof_probs)
+decision_threshold = 0.35
+oof_preds = (oof_probs >= decision_threshold).astype(int)
+
+print(f"{n_splits}-Fold Out-of-Fold ROC-AUC : {cv_auc:.4f}")
+print(f"{n_splits}-Fold Out-of-Fold PR-AUC  : {cv_pr_auc:.4f}")
+print(f"\nClassification Report (Threshold = {decision_threshold}):")
+print(classification_report(y, oof_preds, target_names=["Early/Dev (0)", "Approved/Late (1)"], zero_division=0))
+print("Confusion Matrix:")
+print(pd.DataFrame(confusion_matrix(y, oof_preds),
+                   index=["Actual Dev", "Actual Approved"],
+                   columns=["Pred Dev", "Pred Approved"]))
+
+# =====================================================================
+# 6. HOLDOUT TEST EVALUATION (80/20 SPLIT)
+# =====================================================================
+print("\n" + "=" * 70)
+print("STEP 4: Holdout Test Set Evaluation (20% Split)...")
+print("=" * 70)
+
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.20, stratify=y, random_state=42)
+holdout_model = xgb.XGBClassifier(
+    n_estimators=100, max_depth=4, learning_rate=0.05,
+    subsample=0.8, colsample_bytree=0.8, scale_pos_weight=scale_pos_weight,
+    eval_metric="logloss", random_state=42
+)
+holdout_model.fit(X_train, y_train)
+
+y_test_proba = holdout_model.predict_proba(X_test)[:, 1]
+y_test_preds = (y_test_proba >= decision_threshold).astype(int)
+
+print(f"Holdout Test ROC-AUC : {roc_auc_score(y_test, y_test_proba):.4f}")
+print(f"Holdout Test PR-AUC  : {average_precision_score(y_test, y_test_proba):.4f}")
+
+# =====================================================================
+# 7. FIT FINAL PRODUCTION MODEL & FEATURE IMPORTANCE
+# =====================================================================
+print("\n" + "=" * 70)
+print("STEP 5: Training Final Production Model...")
+print("=" * 70)
+
+final_model = xgb.XGBClassifier(
+    n_estimators=100, max_depth=4, learning_rate=0.05,
+    subsample=0.8, colsample_bytree=0.8, scale_pos_weight=scale_pos_weight,
+    eval_metric="logloss", random_state=42
+)
+final_model.fit(X, y)
+
+feat_imp = pd.DataFrame({
+    "Feature": feature_cols,
+    "Importance": final_model.feature_importances_
+}).sort_values(by="Importance", ascending=False)
+
+print("Top 5 Biological Features Driving Predictions:")
+print(feat_imp.head(5).to_string(index=False))
+
+# =====================================================================
+# 8. BENCHMARK TESTING ON TOP-100 DATASET
+# =====================================================================
+print("\n" + "=" * 70)
+print("STEP 6: Benchmarking Against Top 100 Published Targets...")
+print("=" * 70)
+
+if not os.path.exists(BENCHMARK_TABLE_PATH):
+    print(f"[Notice] Benchmark file not found at: {BENCHMARK_TABLE_PATH}")
+    print("Please set BENCHMARK_TABLE_PATH to your top-100 excel file path.")
+else:
+    try:
+        bench_df = pd.read_excel(BENCHMARK_TABLE_PATH, header=1)
+        bench_df.columns = bench_df.columns.astype(str).str.strip()
+
+        # Handle header offset if columns are at row 0
+        if "Gene1" not in bench_df.columns or "Gene2" not in bench_df.columns:
+            bench_df = pd.read_excel(BENCHMARK_TABLE_PATH, header=0)
+            bench_df.columns = bench_df.columns.astype(str).str.strip()
+
+        if "Gene1" in bench_df.columns and "Gene2" in bench_df.columns:
+            bench_results = []
+            for _, row in bench_df.head(12).iterrows():
+                g1 = str(row["Gene1"]).strip().upper()
+                g2 = str(row["Gene2"]).strip().upper()
+
+                # Calculate live biological features from AnnData
+                p_feats = compute_pair_features(adata, g1, g2)
+                score = float(final_model.predict_proba(pd.DataFrame([p_feats])[feature_cols])[0][1])
+
+                bench_results.append({
+                    "Target_Pair": f"{g1} + {g2}",
+                    "Lit_Stage": row.get("clinical stage", "N/A"),
+                    "Published_Score": row.get("predict score", np.nan),
+                    "Our_Score": round(score, 4),
+                    "Safe_Avg": round(p_feats["safe_avg"], 5),
+                    "Double_Ratio_Max": round(p_feats["double_ratio_max"], 5)
+                })
+
+            df_summary = pd.DataFrame(bench_results)
+            print(df_summary.to_string(index=False))
+
+            # Calculate rank correlation if published scores exist
+            valid_comp = df_summary.dropna(subset=["Published_Score"])
+            if len(valid_comp) >= 5:
+                corr, _ = spearmanr(valid_comp["Published_Score"], valid_comp["Our_Score"])
+                print(f"\nSpearman Rank Correlation vs Published Scores: {corr:.4f}")
+        else:
+            print("Columns 'Gene1' and 'Gene2' not detected in benchmark table.")
+    except Exception as err:
+        print(f"Error during benchmark validation: {err}")
+
+# =====================================================================
+# 9. EXPORT STREAMLIT ARTIFACTS
+# =====================================================================
+print("\n" + "=" * 70)
+print("STEP 7: Exporting Cache Artifacts for Streamlit Frontend...")
+print("=" * 70)
+
+feature_df.to_csv(SAVED_FEATURES_CSV, index=False)
+joblib.dump({"model": final_model, "feature_cols": feature_cols}, SAVED_MODEL_PATH)
+
+sub_cells = (
+    adata.obs["Cell_type.refined"].isin(["tLung", "Tumor", "nLung", "Normal"]) |
+    adata.obs["Cell_subtype"].isin(KEY_SUBTYPES)
+)
+adata[sub_cells].copy().write_h5ad(SAVED_SLICED_H5AD)
+
+print(f"Saved: {SAVED_FEATURES_CSV}")
+print(f"Saved: {SAVED_MODEL_PATH}")
+print(f"Saved: {SAVED_SLICED_H5AD}")
+
+# =====================================================================
+# 10. INTERACTIVE INFERENCE & RAG GENERATOR
+# =====================================================================
+def run_live_inference(gene_a: str, gene_b: str, threshold: float = decision_threshold) -> dict:
+    pair = sorted([gene_a.strip().upper(), gene_b.strip().upper()])
+    live_feats = compute_pair_features(adata, pair[0], pair[1])
+    score = float(final_model.predict_proba(pd.DataFrame([live_feats])[feature_cols])[0][1])
+    verdict = "APPROVED / CANDIDATE DRUG" if score >= threshold else "INVESTIGATIONAL / UNVIABLE"
+
+    safe_tag = discretize_metric("safe_avg", live_feats["safe_avg"])
+    double_tag = discretize_metric("double_ratio_max", live_feats["double_ratio_max"])
+
+    rag_payload = f"""{{ml_result}}
 1. Candidate Targets = [{pair[0]}] + [{pair[1]}]
 2. Dual target expression double-positive score = [{double_tag}] ({live_feats['double_ratio_max']:.5f})
 3. Target safety score = [{safe_tag}] ({live_feats['safe_avg']:.5f})
-4. The final score of the machine learning model = [{prob:.4f}]
+4. The final score of the machine learning model = [{score:.4f}]
 5. Evaluated Microenvironments = T:Treg, T:Exhausted CD8+ T, Myeloid:Macrophage, Epithelial cells
 """
+    return {
+        "pair": f"{pair[0]} + {pair[1]}",
+        "score": score,
+        "verdict": verdict,
+        "rag_payload": rag_payload
+    }
 
-  return {
-      "pair": f"{pair[0]} + {pair[1]}",
-      "target_a": pair[0],
-      "target_b": pair[1],
-      "target_a_resolved": live_feats.get("Target_A_resolved", "N/A"),
-      "target_b_resolved": live_feats.get("Target_B_resolved", "N/A"),
-      "probability": prob,
-      "verdict": verdict,
-      "features": live_feats,
-      "safe_tag": safe_tag,
-      "double_tag": double_tag,
-      "rag_payload": rag_payload,
-  }
+print("\n" + "=" * 70)
+print("STEP 8: Sample Live Candidate Inferences...")
+print("=" * 70)
 
+for ta, tb in [("CD20", "CD3E"), ("CD274", "CTLA4"), ("EGFR", "MET"), ("TIGIT", "LAG3"), ("CD40", "EGFR")]:
+    res = run_live_inference(ta, tb)
+    print(f"Pair: {res['pair']:<18} | Viability Score: {res['score']:.4f} | Verdict: {res['verdict']}")
 
-if __name__ == "__main__":
-  # Standalone verification run
-  adata, model, feature_cols, summary = get_trained_pipeline()
-  print("\n[Engine Ready] Summary:", summary)
-  sample_pred = run_live_inference(
-      adata, model, feature_cols, "CD274", "CTLA4", threshold=0.35
-  )
-  print(f"[Verification Prediction] Score: {sample_pred['probability']:.4f}")
+print("\nPipeline execution complete.")
