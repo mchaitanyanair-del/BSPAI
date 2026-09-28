@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>BiSpec Pairwise AI</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --paper:#F6F5F0; --ink:#16211F; --ink-soft:#4A5654;
+    --teal:#0E8C86; --teal-soft:#E4F2F1;
+    --ochre:#B9812E; --ochre-soft:#F5ECDC;
+    --red:#A6432F; --red-soft:#F6E7E3;
+    --line: rgba(22,33,31,0.14);
+  }
+  *{box-sizing:border-box;}
+  html{scroll-padding-top:env(safe-area-inset-top,0px);}
+  body{
+    margin:0; background:var(--paper); color:var(--ink);
+    font-family:'IBM Plex Sans',sans-serif;
+    padding-top:env(safe-area-inset-top,0px);
+    padding-bottom:env(safe-area-inset-bottom,0px);
+  }
+  .wrap{max-width:980px; margin:0 auto; padding:2.5rem 1.5rem 4rem;}
+  header{margin-bottom:2.2rem;}
+  .mark{font-family:'IBM Plex Mono',monospace; font-size:0.78rem; color:var(--teal); letter-spacing:0.02em; display:flex; align-items:center; gap:0.5rem;}
+  .dot{width:7px; height:7px; border-radius:50%; background:#999; display:inline-block;}
+  .dot.live{background:var(--teal);}
+  .dot.down{background:var(--red);}
+  h1{
+    font-family:'Source Serif 4',serif; font-weight:600;
+    font-size:clamp(1.7rem,4vw,2.4rem); margin:0.3rem 0 0.6rem; line-height:1.15;
+  }
+  .sub{color:var(--ink-soft); max-width:66ch; line-height:1.55; font-size:0.98rem;}
+  .notice{
+    margin-top:1rem; padding:0.7rem 0.9rem; border:1px solid var(--line);
+    border-left:3px solid var(--ochre); background:var(--ochre-soft);
+    font-size:0.85rem; color:#5c4318; line-height:1.5; max-width:66ch;
+  }
+  .notice.err{border-left-color:var(--red); background:var(--red-soft); color:#5c2318;}
+  .grid{display:grid; grid-template-columns:1fr 1fr; gap:1.4rem; margin-top:2.4rem;}
+  @media (max-width:720px){ .grid{grid-template-columns:1fr;} }
+  .panel{border:1px solid var(--line); background:#fff; padding:1.4rem;}
+  .field{margin-bottom:1rem;}
+  label{display:block; font-size:0.82rem; color:var(--ink-soft); margin-bottom:0.35rem;}
+  select,input{
+    width:100%; padding:0.6rem 0.7rem; border:1px solid var(--line);
+    background:var(--paper); font-family:'IBM Plex Mono',monospace; font-size:0.92rem;
+    color:var(--ink);
+  }
+  .hint{font-size:0.78rem; color:var(--ink-soft); margin-top:0.3rem; line-height:1.4;}
+  button.run{
+    margin-top:0.4rem; width:100%; padding:0.75rem; border:none;
+    background:var(--ink); color:var(--paper); font-family:'IBM Plex Sans',sans-serif;
+    font-weight:500; font-size:0.95rem; cursor:pointer; transition:background 0.15s;
+  }
+  button.run:hover{background:var(--teal);}
+  button.run:disabled{background:#999; cursor:default;}
+  .venn-box{display:flex; align-items:center; justify-content:center; min-height:220px;}
+  svg{width:100%; max-width:280px;}
+  .circle{transition:transform 0.6s cubic-bezier(.2,.8,.2,1);}
+  .venn-label{font-family:'IBM Plex Mono',monospace; font-size:11px; fill:var(--ink);}
+  .venn-pct{font-family:'IBM Plex Mono',monospace; font-size:13px; fill:#fff; font-weight:600;}
+  .results{margin-top:1.4rem; opacity:0; transform:translateY(6px); transition:opacity 0.4s, transform 0.4s;}
+  .results.show{opacity:1; transform:translateY(0);}
+  .badge-row{display:flex; gap:0.5rem; flex-wrap:wrap; margin-bottom:1rem;}
+  .badge{
+    font-family:'IBM Plex Mono',monospace; font-size:0.72rem; padding:0.25rem 0.55rem;
+    border:1px solid var(--line); color:var(--ink-soft); background:var(--paper);
+  }
+  .badge.known{border-color:var(--teal); color:var(--teal); background:var(--teal-soft);}
+  .badge.novel{border-color:var(--ochre); color:#7a5620; background:var(--ochre-soft);}
+  .score-row{display:flex; align-items:baseline; gap:0.8rem; margin-bottom:1.2rem;}
+  .score-num{font-family:'IBM Plex Mono',monospace; font-size:2.4rem; font-weight:500; color:var(--teal);}
+  .score-cap{font-size:0.85rem; color:var(--ink-soft); max-width:24ch;}
+  .feat-grid{display:grid; grid-template-columns:1fr 1fr; gap:0.6rem 1.4rem; margin-bottom:1.4rem;}
+  @media (max-width:520px){ .feat-grid{grid-template-columns:1fr;} }
+  .feat-top{display:flex; justify-content:space-between; font-size:0.82rem; padding:0.4rem 0; border-bottom:1px solid var(--line);}
+  .feat-name{color:var(--ink-soft);}
+  .feat-val{font-family:'IBM Plex Mono',monospace; color:var(--ink);}
+  .report{
+    margin-top:0.4rem; padding:1.6rem; border:1px solid var(--line); background:#fff;
+  }
+  .report h2{font-family:'Source Serif 4',serif; font-size:1.15rem; margin:0 0 0.9rem;}
+  .report p{font-family:'Source Serif 4',serif; font-size:0.98rem; line-height:1.7; color:#2a3533; margin:0 0 0.9rem;}
+  .report .tag{
+    font-family:'IBM Plex Mono',monospace; font-size:0.75rem; color:var(--teal);
+    margin-bottom:0.2rem;
+  }
+  .leaderboard{margin-top:2.6rem;}
+  .leaderboard h2{font-family:'Source Serif 4',serif; font-size:1.15rem; margin:0 0 0.9rem;}
+  table{width:100%; border-collapse:collapse; font-size:0.85rem;}
+  th,td{text-align:left; padding:0.5rem 0.6rem; border-bottom:1px solid var(--line);}
+  th{font-family:'IBM Plex Mono',monospace; font-size:0.72rem; color:var(--ink-soft); font-weight:500;}
+  td.mono{font-family:'IBM Plex Mono',monospace;}
+  tr.clickable{cursor:pointer;}
+  tr.clickable:hover{background:var(--teal-soft);}
+  footer{margin-top:3rem; font-size:0.78rem; color:var(--ink-soft); line-height:1.6; max-width:66ch;}
+  .spinner{display:inline-block; width:14px; height:14px; border:2px solid #ccc; border-top-color:var(--teal); border-radius:50%; animation:spin 0.7s linear infinite; vertical-align:middle; margin-right:0.4rem;}
+  @keyframes spin{to{transform:rotate(360deg);}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="mark"><span class="dot" id="statusDot"></span><span id="statusText">BISPEC PAIRWISE AI — checking backend…</span></div>
+    <h1>Score a bispecific antibody target pair</h1>
+    <p class="sub">Type two gene targets. This queries a live FastAPI backend running an XGBoost model trained on 328 real, unique target pairs derived from 782 actual bispecific antibody drug programs (the paper's own Supplementary Table 1 — ClinicalTrials.gov-sourced clinical-stage data).</p>
+    <div class="notice" id="scopeNotice">This baseline model was trained only on drug-program popularity and structural features (how many programs/orgs have tried a target, CD3 involvement, checkpoint-gene membership) — not the paper's full biological feature set (safety score, co-expression, pathway overlap, Gene2Vec similarity), since that requires scRNA-seq/KEGG/Gene2Vec data this pipeline hasn't been given yet. Known approved pairs will score high almost by construction; treat scores for genuinely novel pairs as a weak prior, not a validated prediction.</div>
+  </header>
+
+  <div class="grid">
+    <div class="panel">
+      <div class="field">
+        <label for="g1">Target 1</label>
+        <input type="text" id="g1" list="geneList" placeholder="e.g. CD3E" autocomplete="off">
+      </div>
+      <div class="field">
+        <label for="g2">Target 2</label>
+        <input type="text" id="g2" list="geneList" placeholder="e.g. MS4A1" autocomplete="off">
+      </div>
+      <datalist id="geneList"></datalist>
+      <button class="run" id="runBtn">Analyze pair</button>
+      <div class="hint" id="runHint"></div>
+      <div class="hint" id="typeHint" style="margin-top:0.5rem;"></div>
+    </div>
+
+    <div class="panel venn-box">
+      <svg viewBox="0 0 280 200">
+        <circle class="circle" id="cA" cx="115" cy="100" r="60" fill="#0E8C86" opacity="0.55"/>
+        <circle class="circle" id="cB" cx="165" cy="100" r="60" fill="#B9812E" opacity="0.55"/>
+        <text class="venn-label" x="55" y="42" id="labA">TARGET 1</text>
+        <text class="venn-label" x="180" y="42" id="labB">TARGET 2</text>
+        <text class="venn-pct" x="140" y="104" text-anchor="middle" id="labPct">—</text>
+      </svg>
+    </div>
+  </div>
+
+  <div class="results" id="results">
+    <div class="badge-row" id="badgeRow"></div>
+    <div class="score-row">
+      <div class="score-num" id="scoreNum">—</div>
+      <div class="score-cap">model score, 0–100<br>(scaled against this dataset's own score range)</div>
+    </div>
+
+    <div class="feat-grid" id="featGrid"></div>
+
+    <div class="report">
+      <div class="tag">GENERATED INTERPRETIVE REPORT</div>
+      <h2 id="repTitle">—</h2>
+      <div id="repBody"></div>
+    </div>
+  </div>
+
+  <div class="leaderboard">
+    <h2>Top pairs by model score</h2>
+    <div id="leaderboardBox">Loading…</div>
+  </div>
+
+  <footer id="footerNote">
+    Backend expected at <code id="apiUrlLabel"></code>. If the status dot above is red, start it with
+    <code>uvicorn main:app --reload --port 8000</code> from the <code>backend/</code> folder, then reload this page.
+  </footer>
+
+</div>
+
+<script>
+const API_BASE = "http://localhost:8000"; // change if your backend runs elsewhere
+document.getElementById("apiUrlLabel").textContent = API_BASE;
+
+const statusDot = document.getElementById("statusDot");
+const statusText = document.getElementById("statusText");
+const g1sel = document.getElementById("g1");
+const g2sel = document.getElementById("g2");
+const runBtn = document.getElementById("runBtn");
+const runHint = document.getElementById("runHint");
+const results = document.getElementById("results");
+
+let GENES = [];
+
+function setStatus(ok, msg){
+  statusDot.className = "dot " + (ok === null ? "" : ok ? "live" : "down");
+  statusText.textContent = msg;
+}
+
+async function init(){
+  try{
+    const r = await fetch(`${API_BASE}/genes`);
+    if(!r.ok) throw new Error("bad response");
+    const data = await r.json();
+    GENES = data.genes;
+    setStatus(true, `BISPEC PAIRWISE AI — backend live (${data.count} genes loaded)`);
+    populateSelects();
+    loadLeaderboard();
+  }catch(err){
+    setStatus(false, "BISPEC PAIRWISE AI — backend not reachable");
+    document.getElementById("leaderboardBox").innerHTML =
+      `<div class="notice err">Could not reach the backend at ${API_BASE}. Start it (see footer) and reload.</div>`;
+    runBtn.disabled = true;
+    runHint.textContent = "Backend offline — start the FastAPI server first.";
+  }
+}
+
+function populateSelects(){
+  // datalist just powers browser autocomplete suggestions — inputs stay free text,
+  // so any gene name can be typed, including ones outside this list.
+  document.getElementById("geneList").innerHTML =
+    GENES.map(g => `<option value="${g}">`).join("");
+  // sensible, genuinely-known default pair from the real dataset
+  g1sel.value = GENES.includes("CD3E") ? "CD3E" : (GENES[0] || "");
+  g2sel.value = GENES.includes("MS4A1") ? "MS4A1" : (GENES[1] || "");
+  updateTypeHint();
+  g1sel.addEventListener("input", updateTypeHint);
+  g2sel.addEventListener("input", updateTypeHint);
+}
+
+const typeHint = document.getElementById("typeHint");
+const GENE_SET_UPPER = () => new Set(GENES.map(g => g.toUpperCase()));
+
+function updateTypeHint(){
+  const v1 = g1sel.value.trim().toUpperCase();
+  const v2 = g2sel.value.trim().toUpperCase();
+  if(!v1 && !v2){ typeHint.textContent = ""; return; }
+  const set = GENE_SET_UPPER();
+  const parts = [];
+  if(v1) parts.push(`${v1}: ${set.has(v1) ? "recognized" : "not in training data — will use fallback stats"}`);
+  if(v2) parts.push(`${v2}: ${set.has(v2) ? "recognized" : "not in training data — will use fallback stats"}`);
+  typeHint.textContent = parts.join("  ·  ");
+}
+
+function updateVenn(g1, g2, pct){
+  document.getElementById("labA").textContent = g1;
+  document.getElementById("labB").textContent = g2;
+  document.getElementById("labPct").textContent = pct === null ? "—" : `${pct.toFixed(0)}%`;
+  const overlap = pct === null ? 40 : 20 + (pct/100)*40; // px shift, purely visual
+  document.getElementById("cA").style.transform = `translateX(${-overlap/2}px)`;
+  document.getElementById("cB").style.transform = `translateX(${overlap/2}px)`;
+}
+
+async function runAnalysis(){
+  const g1 = g1sel.value.trim().toUpperCase();
+  const g2 = g2sel.value.trim().toUpperCase();
+  if(!g1 || !g2){
+    runHint.textContent = "Type both target gene names.";
+    return;
+  }
+  if(g1 === g2){
+    runHint.textContent = "Type two different targets.";
+    return;
+  }
+  runHint.innerHTML = '<span class="spinner"></span>Querying model…';
+  runBtn.disabled = true;
+  results.classList.remove("show");
+
+  try{
+    const r = await fetch(`${API_BASE}/predict`, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({gene1: g1, gene2: g2})
+    });
+    const data = await r.json();
+    if(!r.ok){
+      runHint.textContent = data.detail || "Request failed.";
+      runBtn.disabled = false;
+      return;
+    }
+    renderResult(data);
+    runHint.textContent = "";
+  }catch(err){
+    runHint.textContent = "Could not reach the backend. Is it running?";
+  }
+  runBtn.disabled = false;
+}
+
+function renderResult(d){
+  updateVenn(d.gene1, d.gene2, d.display_score);
+
+  document.getElementById("badgeRow").innerHTML = `
+    <span class="badge ${d.is_known_pair ? 'known' : 'novel'}">
+      ${d.is_known_pair ? 'Known pair — has clinical history' : 'Novel pair — not in training data'}
+    </span>
+    <span class="badge">${d.pair_type.replaceAll('_',' ')}</span>
+    ${d.best_stage_label ? `<span class="badge">Best stage: ${d.best_stage_label}</span>` : ''}
+  `;
+
+  document.getElementById("scoreNum").textContent = d.display_score.toFixed(1);
+
+  const f = d.features;
+  const featLabels = {
+    gene_a_freq: `${d.gene1} program frequency`,
+    gene_b_freq: `${d.gene2} program frequency`,
+    n_programs: "Programs on this exact pair",
+    n_orgs: "Organizations on this exact pair",
+    involves_CD3: "Involves CD3E (T-cell engager arm)",
+    is_checkpoint_pair: "Both are checkpoint genes",
+  };
+  document.getElementById("featGrid").innerHTML = Object.entries(featLabels).map(([k,label]) => {
+    let val = f[k];
+    if(k === "involves_CD3" || k === "is_checkpoint_pair") val = val ? "yes" : "no";
+    return `<div class="feat-top"><span class="feat-name">${label}</span><span class="feat-val">${val}</span></div>`;
+  }).join("");
+
+  document.getElementById("repTitle").textContent = `${d.gene1} + ${d.gene2}`;
+  document.getElementById("repBody").innerHTML = `<p>${d.report}</p>`;
+
+  results.classList.add("show");
+}
+
+async function loadLeaderboard(){
+  try{
+    const r = await fetch(`${API_BASE}/pairs/top?n=15`);
+    const rows = await r.json();
+    const html = `
+      <table>
+        <thead><tr>
+          <th>Pair</th><th>Type</th><th>Best stage</th><th>Programs</th><th>Score</th>
+        </tr></thead>
+        <tbody>
+          ${rows.map(row => `
+            <tr class="clickable" data-a="${row.gene_a}" data-b="${row.gene_b}">
+              <td class="mono">${row.gene_a} + ${row.gene_b}</td>
+              <td>${row.pair_type.replaceAll('_',' ')}</td>
+              <td class="mono">${row.best_stage}</td>
+              <td class="mono">${row.n_programs}</td>
+              <td class="mono">${row.predicted_score.toFixed(3)}</td>
+            </tr>`).join("")}
+        </tbody>
+      </table>`;
+    document.getElementById("leaderboardBox").innerHTML = html;
+    document.querySelectorAll("tr.clickable").forEach(tr => {
+      tr.addEventListener("click", () => {
+        g1sel.value = tr.dataset.a;
+        g2sel.value = tr.dataset.b;
+        runAnalysis();
+        window.scrollTo({top: 0, behavior: "smooth"});
+      });
+    });
+  }catch(err){
+    document.getElementById("leaderboardBox").innerHTML = "Could not load leaderboard.";
+  }
+}
+
+runBtn.addEventListener("click", runAnalysis);
+init();
+</script>
+</body>
+</html>
